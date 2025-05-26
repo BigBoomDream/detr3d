@@ -26,9 +26,9 @@ class NMSFreeCoder(BaseBBoxCoder):
                  score_threshold=None,
                  num_classes=10):
         
-        self.pc_range = pc_range
+        self.pc_range = pc_range    # [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
         self.voxel_size = voxel_size
-        self.post_center_range = post_center_range
+        self.post_center_range = post_center_range  # [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
         self.max_num = max_num
         self.score_threshold = score_threshold
         self.num_classes = num_classes
@@ -37,7 +37,7 @@ class NMSFreeCoder(BaseBBoxCoder):
         pass
 
     def decode_single(self, cls_scores, bbox_preds):
-        """Decode bboxes.
+        """Decode bboxes. 解码一个批次中单个样本的预测结果
         Args:
             cls_scores (Tensor): Outputs from the classification head, \
                 shape [num_query, cls_out_channels]. Note \
@@ -48,15 +48,37 @@ class NMSFreeCoder(BaseBBoxCoder):
         Returns:
             list[dict]: Decoded boxes.
         """
-        max_num = self.max_num
+        # 输入的是最后一层解码器对一张图像的预测类别得分、边界框预测
+        max_num = self.max_num  # 配置文件中max_num=300,  最终输出框的数量上限
 
         cls_scores = cls_scores.sigmoid()
-        scores, indexs = cls_scores.view(-1).topk(max_num)
+        # ls_scores.view(-1) 将 (num_query, num_classes) 展平为1D张量；
+        # .topk(max_num) 获取前 'max_num' 个得分及其在展平张量中的原始索引
+        # 原先900个query，10个类别，就会变成9000个元素的张量，选置信度最大的300个
+        scores, indexs = cls_scores.view(-1).topk(max_num)  # scores 将包含最高的 max_num 个置信度值，而 indexs 将告诉我们它们来自哪里
+        # 取余运算，得到300个高置信度的标签
         labels = indexs % self.num_classes
+        # 取整除法，得到300个高置信度的对应的query
         bbox_index = indexs // self.num_classes
         bbox_preds = bbox_preds[bbox_index]
+        # 此时的 bbox_preds 是 (max_num, code_size)，例如 (300, 10)
+        # 其格式为 (cx_pred, cy_pred, w_pred, l_pred, cz_pred, h_pred, sin_pred, cos_pred, vx_pred, vy_pred)
 
         final_box_preds = denormalize_bbox(bbox_preds, self.pc_range)   
+        # denormalize_bbox 将网络的输出格式转换回标准的3D框参数。
+        # 输入: (cx, cy, w, l, cz, h, sin, cos, vx, vy) (其中w,l,h是直接预测，不是log)
+        # 输出: (cx, cy, cz, w_exp, l_exp, h_exp, atan2(sin,cos), vx, vy)
+        #   - cx, cy, cz 在 Detr3DHead 的 forward 中已经按 pc_range 缩放，所以如果它们已经是世界尺度，denormalize_bbox 会按原样使用它们。
+        #     或者，如果它们通过 inverse_sigmoid(reference_points) + offset 被归一化到 [0,1]，
+        #     那么 denormalize_bbox 会使用 pc_range 来缩放它们。
+        #     鉴于 Detr3DHead 的 forward 逻辑：
+        #       tmp[..., 0:1] = (tmp[..., 0:1] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0])
+        #       tmp[..., 1:2] = (tmp[..., 1:2] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1])
+        #       tmp[..., 4:5] = (tmp[..., 4:5] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2])
+        #     输入到 denormalize_bbox 的 cx, cy, cz 已经是世界尺度。
+        #   - w, l, h 进行指数运算 (w.exp(), l.exp(), h.exp())，因为损失目标是 log(维度)。
+        #   - 旋转角 (yaw) 使用 atan2(sin, cos) 恢复。
+        #   - vx, vy 按原样使用。
         final_scores = scores 
         final_preds = labels 
 
@@ -101,11 +123,26 @@ class NMSFreeCoder(BaseBBoxCoder):
         Returns:
             list[dict]: Decoded boxes.
         """
-        all_cls_scores = preds_dicts['all_cls_scores'][-1]
-        all_bbox_preds = preds_dicts['all_bbox_preds'][-1]
+        '''输入的preds_dicts是
+        preds_dicts = {
+            'all_cls_scores': outputs_classes, # 每一层预测的分类概率 
+            'all_bbox_preds': outputs_coords,  # 每一层预测的回归
+            'enc_cls_scores': None,
+            'enc_bbox_preds': None, 
+        }
+        '''
+        all_cls_scores = preds_dicts['all_cls_scores'][-1]  # 仅使用最后一个解码器层的得分 
+        all_bbox_preds = preds_dicts['all_bbox_preds'][-1]  # 仅使用最后一个解码器层的边界框预测
         
         batch_size = all_cls_scores.size()[0]
         predictions_list = []
         for i in range(batch_size):
+            '''decode_single返回值：
+                predictions_dict = {
+                    'bboxes': boxes3d,
+                    'scores': scores,
+                    'labels': labels
+                }
+            '''
             predictions_list.append(self.decode_single(all_cls_scores[i], all_bbox_preds[i]))
         return predictions_list

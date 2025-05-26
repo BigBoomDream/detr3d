@@ -24,11 +24,15 @@ def normalize_bbox(bboxes, pc_range):
     return normalized_bboxes
 
 def denormalize_bbox(normalized_bboxes, pc_range):
+    # normalized_bboxes (模型输出): (cx, cy, w, l, cz, h, rot_sine, rot_cosine, vx, vy)
+    # 其中 cx,cy,cz 已经是世界尺度 (由于Detr3DHead的forward逻辑)
+    # w,l,h 是直接预测 (模型学习预测接近log(gt_dims)的值)
+
     # rotation 
     rot_sine = normalized_bboxes[..., 6:7]
 
     rot_cosine = normalized_bboxes[..., 7:8]
-    rot = torch.atan2(rot_sine, rot_cosine)
+    rot = torch.atan2(rot_sine, rot_cosine) # 恢复偏航角
 
     # center in the bev
     cx = normalized_bboxes[..., 0:1]
@@ -43,7 +47,7 @@ def denormalize_bbox(normalized_bboxes, pc_range):
     w = w.exp() 
     l = l.exp() 
     h = h.exp() 
-    if normalized_bboxes.size(-1) > 8:
+    if normalized_bboxes.size(-1) > 8:  # 如果存在速度
          # velocity 
         vx = normalized_bboxes[:, 8:9]
         vy = normalized_bboxes[:, 9:10]

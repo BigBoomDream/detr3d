@@ -62,7 +62,7 @@ class Detr3D(MVXTwoStageDetector):
         img_feats_reshaped = []
         for img_feat in img_feats:
             BN, C, H, W = img_feat.size()
-            img_feats_reshaped.append(img_feat.view(B, int(BN / B), C, H, W))
+            img_feats_reshaped.append(img_feat.view(B, int(BN / B), C, H, W))       # [[B, 6, 256, 116, 200] [B, 6, 256, 58, 100] [6, 256, 29, 50] [6, 256, 15, 25]]。
         return img_feats_reshaped
 
     @auto_fp16(apply_to=('img'), out_fp32=True)
@@ -90,8 +90,30 @@ class Detr3D(MVXTwoStageDetector):
         Returns:
             dict: Losses of each branch.
         """
-        outs = self.pts_bbox_head(pts_feats, img_metas)
+
+        # 对应配置文件的：pts_bbox_head ：type='Detr3DHead' projects/mmdet3d_plugin/models/dense_heads/detr3d_head.py
+        '''
+        outs = {
+            'all_cls_scores': outputs_classes, # 每一层的分类概率
+            'all_bbox_preds': outputs_coords,  # 每一层的回归
+            'enc_cls_scores': None,
+            'enc_bbox_preds': None, 
+        }
+        '''
+        outs = self.pts_bbox_head(pts_feats, img_metas)  # 传入的 pts_feats 是FPN输出的多层特征图
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+        '''
+        loss是一个字典形式，得到了 解码器每一层的损失
+            {
+                'loss_cls': 第5层分类损失值,
+                'loss_bbox': 第5层边界框损失值,
+                'd0.loss_cls': 第0层分类损失值,
+                'd0.loss_bbox': 第0层边界框损失值,
+                'd1.loss_cls': 第1层分类损失值,
+                'd1.loss_bbox': 第1层边界框损失值,
+                # ... (直到 d4)
+            }
+        '''
         losses = self.pts_bbox_head.loss(*loss_inputs)
         return losses
 
@@ -146,12 +168,25 @@ class Detr3D(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+        img_feats = self.extract_feat(img=img, img_metas=img_metas) # 就是FPN输出的多尺度特征！ [[B, 6, 256, 116, 200] [B, 6, 256, 58, 100] [B, 6, 256, 29, 50] [B, 6, 256, 15, 25]]
         losses = dict()
+        '''
+        forward_pts_train函数返回值：
+        loss是一个字典形式，得到了 解码器每一层的损失
+            {
+                'loss_cls': 第5层分类损失值,
+                'loss_bbox': 第5层边界框损失值,
+                'd0.loss_cls': 第0层分类损失值,
+                'd0.loss_bbox': 第0层边界框损失值,
+                'd1.loss_cls': 第1层分类损失值,
+                'd1.loss_bbox': 第1层边界框损失值,
+                # ... (直到 d4)
+            }
+        '''
         losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
                                             gt_labels_3d, img_metas,
                                             gt_bboxes_ignore)
-        losses.update(losses_pts)
+        losses.update(losses_pts)   # update() 将一个字典的内容更新到另一个字典中
         return losses
     
     def forward_test(self, img_metas, img=None, **kwargs):
@@ -169,7 +204,16 @@ class Detr3D(MVXTwoStageDetector):
 
     def simple_test_pts(self, x, img_metas, rescale=False):
         """Test function of point cloud branch."""
+        '''
+        outs = {
+            'all_cls_scores': outputs_classes, # 每一层预测的分类概率
+            'all_bbox_preds': outputs_coords,  # 每一层预测的回归
+            'enc_cls_scores': None,
+            'enc_bbox_preds': None, 
+        }
+        '''
         outs = self.pts_bbox_head(x, img_metas)
+        # 返回一个列表，每个元素是一个包含单个样本的 [bboxes, scores, labels] 的列表。
         bbox_list = self.pts_bbox_head.get_bboxes(
             outs, img_metas, rescale=rescale)
         bbox_results = [
